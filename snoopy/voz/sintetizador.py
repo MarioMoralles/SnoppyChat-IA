@@ -38,6 +38,9 @@ class Sintetizador:
         self._pyttsx3_motor = None
         self._fala_em_andamento = asyncio.Lock()
 
+        # Referência opcional ao ouvinte — se definida, silencia o mic durante a fala
+        self.ouvinte = None
+
         # Diretório de modelos Piper
         self._dir_vozes = Path.home() / ".cache" / "snoopy" / "piper"
         self._dir_vozes.mkdir(parents=True, exist_ok=True)
@@ -134,13 +137,20 @@ class Sintetizador:
             return
 
         async with self._fala_em_andamento:
-            if self._piper_disponivel:
-                await self._falar_piper(texto)
-            elif self._pyttsx3_motor:
-                await self._falar_pyttsx3(texto)
-            else:
-                # Sem TTS disponível — apenas loga
-                logger.info(f"[TTS indisponível] Resposta: {texto}")
+            # Silencia o microfone para não captar a própria voz
+            if self.ouvinte:
+                self.ouvinte.silenciado = True
+            try:
+                if self._piper_disponivel:
+                    await self._falar_piper(texto)
+                elif self._pyttsx3_motor:
+                    await self._falar_pyttsx3(texto)
+                else:
+                    logger.info(f"[TTS indisponível] Resposta: {texto}")
+            finally:
+                # Garante que o microfone é reativado mesmo em caso de erro
+                if self.ouvinte:
+                    self.ouvinte.silenciado = False
 
     async def _falar_piper(self, texto: str):
         """Usa Piper TTS para sintetizar e reproduzir."""

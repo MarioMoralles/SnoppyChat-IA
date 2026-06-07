@@ -84,6 +84,9 @@ class Snoopy:
                 callback=self._processar_entrada
             )
             await self.ouvinte.inicializar()
+            # Conecta o ouvinte ao sintetizador para silenciar o mic durante a fala
+            if self.sintetizador:
+                self.sintetizador.ouvinte = self.ouvinte
             logger.info("✅ Ouvinte de voz pronto")
 
         self.rodando = True

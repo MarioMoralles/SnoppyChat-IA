@@ -53,16 +53,22 @@ class Ouvinte:
         self._fila_audio = queue.Queue()
         self._thread_escuta: Optional[threading.Thread] = None
         self._thread_processamento: Optional[threading.Thread] = None
+        # Referência ao loop principal — capturada em inicializar() e usada nas threads
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        # Flag para silenciar a captura enquanto o Snoopy está falando (evita eco)
+        self.silenciado = False
 
     async def inicializar(self):
         """Carrega o modelo Whisper e inicia a captura de áudio."""
+        # Captura o loop do asyncio AQUI, enquanto ainda estamos na corrotina principal.
+        # As threads secundárias não têm event loop próprio, então precisam desta referência.
+        self._loop = asyncio.get_running_loop()
+
         logger.info(
             f"Carregando Whisper ({self.modelo_whisper_tamanho})... "
             "Isso pode levar alguns segundos na primeira vez."
         )
-        await asyncio.get_event_loop().run_in_executor(
-            None, self._carregar_modelo_whisper
-        )
+        await self._loop.run_in_executor(None, self._carregar_modelo_whisper)
         logger.info("Modelo Whisper carregado.")
         self.ativo = True
         self._iniciar_threads()
@@ -125,7 +131,8 @@ class Ouvinte:
             def callback_audio(indata, frames, time_info, status):
                 if status:
                     logger.debug(f"Status de áudio: {status}")
-                if self.ativo:
+                # Ignora áudio enquanto o Snoopy está falando (evita eco da própria voz)
+                if self.ativo and not self.silenciado:
                     self._fila_audio.put(indata.copy())
 
             with sd.InputStream(
@@ -202,28 +209,45 @@ class Ouvinte:
             if not texto:
                 return
 
-            logger.debug(f"Transcrito: '{texto}'")
+            texto_limpo = texto.strip()
+            logger.info(f"Transcrito: '{texto_limpo}'")
+
+            texto_lower = texto_limpo.lower()
 
             # Verifica se a palavra de ativação está presente
-            texto_lower = texto.lower()
-            if self.palavra_ativacao in texto_lower:
-                # Remove a palavra de ativação e limpa o texto
-                comando = texto_lower.replace(self.palavra_ativacao, "").strip()
-                # Remove pontuação inicial
-                comando = comando.lstrip(".,!?:;- ")
+            if self.palavra_ativacao not in texto_lower:
+                return
 
-                if comando:
-                    logger.info(f"Comando reconhecido: '{comando}'")
-                    asyncio.run_coroutine_threadsafe(
-                        self.callback(comando),
-                        asyncio.get_event_loop()
-                    )
-                else:
-                    # Só o nome foi dito — pede para continuar
-                    asyncio.run_coroutine_threadsafe(
-                        self.callback("olá"),
-                        asyncio.get_event_loop()
-                    )
+            # Extrai o comando preservando caixa original para melhor compreensão
+            # Encontra a posição da palavra de ativação (insensível a maiúsculas)
+            import re
+            padrao = re.compile(re.escape(self.palavra_ativacao), re.IGNORECASE)
+            match = padrao.search(texto_limpo)
+
+            if match:
+                # Tudo após a palavra de ativação é o comando
+                comando = texto_limpo[match.end():].strip()
+                # Remove vírgulas e pontuação inicial
+                comando = re.sub(r'^[\s,\.!?:;]+', '', comando).strip()
+            else:
+                comando = ""
+
+            # Remove o nome caso tenha aparecido no meio ou no final também
+            comando = padrao.sub("", comando).strip()
+
+            if len(comando) > 2:
+                logger.info(f"✅ Comando final: '{comando}'")
+                asyncio.run_coroutine_threadsafe(
+                    self.callback(comando),
+                    self._loop
+                )
+            else:
+                # Só o nome foi dito sem comando — cumprimenta
+                logger.info("Palavra de ativação detectada sem comando — cumprimentando")
+                asyncio.run_coroutine_threadsafe(
+                    self.callback("olá"),
+                    self._loop
+                )
 
         except Exception as e:
             logger.error(f"Erro na transcrição: {e}")
