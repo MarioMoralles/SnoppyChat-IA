@@ -1,0 +1,35 @@
+# docker-compose.yml
+# OPCIONAL: use apenas se quiser rodar o Ollama em container Docker.
+# Para uso normal, instale o Ollama diretamente no host (recomendado).
+#
+# Uso: docker compose up -d ollama
+# Depois: docker exec -it snoopy-ollama ollama pull llama3.2:3b
+
+version: "3.9"
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: snoopy-ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_dados:/root/.ollama
+    # Para usar GPU NVIDIA, descomente abaixo e instale nvidia-container-toolkit
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+volumes:
+  ollama_dados:
+    driver: local
+
+# Notas:
+# - O Snoopy em si NÃO precisa rodar em Docker — rode direto com 'python main.py'
+# - Este compose é APENAS para o Ollama, caso prefira isolá-lo
+# - Modelos baixados pelo container ficam no volume 'ollama_dados'

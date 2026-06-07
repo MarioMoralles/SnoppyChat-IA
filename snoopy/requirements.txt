@@ -1,0 +1,27 @@
+# ============================================================
+# Snoopy - Dependências Python
+# ============================================================
+# Instale com: pip install -r requirements.txt
+# ============================================================
+
+# --- IA / LLM ---
+httpx>=0.27.0              # Cliente HTTP assíncrono para Ollama/LM Studio
+
+# --- Reconhecimento de Voz (STT) ---
+faster-whisper>=1.0.0      # Whisper otimizado (recomendado)
+# openai-whisper>=20240930  # Alternativa: Whisper original da OpenAI
+sounddevice>=0.4.6         # Captura de áudio do microfone
+numpy>=1.24.0              # Processamento de arrays de áudio
+
+# --- Síntese de Voz (TTS) ---
+pyttsx3>=2.90              # TTS de fallback (funciona offline sem instalação extra)
+# Piper TTS: instalação separada — veja README.md
+
+# --- Utilitários ---
+python-dotenv>=1.0.0       # Carrega variáveis de ambiente do .env
+
+# --- Opcionais (melhoram a experiência) ---
+# pyperclip>=1.8.2         # Para modo ditado (colar texto)
+# pynput>=1.7.6            # Para tecla de atalho do modo ditado
+# plyer>=2.1.0             # Notificações do sistema operacional
+# rich>=13.0.0             # Terminal mais bonito (logs coloridos)
