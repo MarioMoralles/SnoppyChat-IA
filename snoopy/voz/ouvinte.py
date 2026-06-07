@@ -1,12 +1,14 @@
 """
-Módulo de Escuta de Voz
-Usa Whisper (offline) para reconhecimento de fala.
-Detecta a palavra de ativação 'Snoopy' em qualquer parte da frase.
+Módulo de Escuta de Voz — Reescrito para robustez
+Usa Whisper offline para reconhecimento de fala.
+Arquitetura: thread de áudio → fila → thread de transcrição → asyncio seguro
 """
 
 import asyncio
 import queue
 import threading
+import re
+import time
 import numpy as np
 from typing import Callable, Optional
 from pathlib import Path
@@ -16,274 +18,273 @@ from ..utils.config import Configuracao
 
 logger = obter_logger("voz.ouvinte")
 
+# Variações fonéticas de "Snoopy" que o Whisper costuma gerar em pt-BR
+# (coletadas de testes reais com sotaque brasileiro)
+VARIACOES_SNOOPY = [
+    "snoopy", "snoop", "snoopi", "snopi", "snuppy",
+    "znupi", "znuppi", "eznupi", "isnupi", "snupi",
+    "snúpi", "snoppy", "snoppe", "znoop", "eznoop",
+    "snoupie", "eznupy", "eznupe", "snupe", "snupe",
+    "snupy", "esnoopy", "isnoop", "znupy", "snoupe",
+]
+
+
+def _detectar_ativacao(texto: str, variacoes: list) -> tuple:
+    """
+    Detecta se alguma variação da palavra de ativação está no texto.
+    Retorna (encontrado: bool, posicao_fim: int)
+    """
+    texto_lower = texto.lower()
+    melhor_pos = -1
+
+    for variacao in variacoes:
+        padrao = re.compile(r'\b' + re.escape(variacao) + r'\b', re.IGNORECASE)
+        match = padrao.search(texto_lower)
+        if match:
+            # Pega a posição mais à esquerda encontrada
+            if melhor_pos == -1 or match.end() < melhor_pos:
+                melhor_pos = match.end()
+
+    if melhor_pos > -1:
+        return True, melhor_pos
+    return False, -1
+
 
 class Ouvinte:
     """
-    Ouvinte de voz contínuo com detecção de palavra de ativação.
-    
-    Usa:
-    - faster-whisper (versão otimizada do Whisper) para transcrição offline
-    - sounddevice para captura de áudio
-    - Detecção de silêncio para segmentar frases
+    Ouvinte de voz com pipeline robusto:
+    sounddevice → fila_chunks → thread_deteccao_vad → thread_transcricao → asyncio
     """
 
     def __init__(
         self,
         config: Configuracao,
         palavra_ativacao: str,
-        callback: Callable[[str], None]
+        callback: Callable
     ):
         self.config = config
         self.palavra_ativacao = palavra_ativacao.lower()
         self.callback = callback
         self.ativo = False
+        self.silenciado = False  # True enquanto o Snoopy está falando
 
         # Configurações de áudio
         self.taxa_amostragem = config.get("audio_taxa_amostragem", 16000)
         self.tamanho_chunk = config.get("audio_tamanho_chunk", 1024)
-        self.limiar_silencio = config.get("audio_limiar_silencio", 0.01)
-        self.duracao_silencio = config.get("audio_duracao_silencio_seg", 1.5)
-        self.duracao_max_frase = config.get("audio_duracao_max_frase_seg", 15)
+        self.limiar_silencio = config.get("audio_limiar_silencio", 0.015)
+        self.duracao_silencio = config.get("audio_duracao_silencio_seg", 1.2)
+        self.duracao_max_frase = config.get("audio_duracao_max_frase_seg", 12)
+        self.duracao_min_frase = config.get("audio_duracao_min_frase_seg", 0.4)
 
         # Modelo Whisper
-        self.modelo_whisper_tamanho = config.get("whisper_modelo", "base")
-        self.modelo_whisper_idioma = config.get("whisper_idioma", "pt")
+        self._tamanho_modelo = config.get("whisper_modelo", "base")
+        self._idioma = config.get("whisper_idioma", "pt")
         self._modelo = None
+        self._usar_whisper_padrao = False
 
-        self._fila_audio = queue.Queue()
-        self._thread_escuta: Optional[threading.Thread] = None
-        self._thread_processamento: Optional[threading.Thread] = None
-        # Referência ao loop principal — capturada em inicializar() e usada nas threads
+        # Variações fonéticas para detecção flexível
+        self._variacoes = VARIACOES_SNOOPY if self.palavra_ativacao == "snoopy" \
+            else [self.palavra_ativacao]
+
+        # Filas e threads
+        self._fila_chunks: queue.Queue = queue.Queue()
+        self._fila_segmentos: queue.Queue = queue.Queue()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
-        # Flag para silenciar a captura enquanto o Snoopy está falando (evita eco)
-        self.silenciado = False
 
     async def inicializar(self):
-        """Carrega o modelo Whisper e inicia a captura de áudio."""
-        # Captura o loop do asyncio AQUI, enquanto ainda estamos na corrotina principal.
-        # As threads secundárias não têm event loop próprio, então precisam desta referência.
+        """Carrega o modelo e inicia o pipeline."""
         self._loop = asyncio.get_running_loop()
 
-        logger.info(
-            f"Carregando Whisper ({self.modelo_whisper_tamanho})... "
-            "Isso pode levar alguns segundos na primeira vez."
-        )
-        await self._loop.run_in_executor(None, self._carregar_modelo_whisper)
-        logger.info("Modelo Whisper carregado.")
+        logger.info(f"Carregando Whisper '{self._tamanho_modelo}'...")
+        await self._loop.run_in_executor(None, self._carregar_modelo)
+        logger.info("Modelo Whisper pronto.")
+
         self.ativo = True
         self._iniciar_threads()
 
-    def _carregar_modelo_whisper(self):
-        """Carrega o modelo faster-whisper localmente."""
+    def _carregar_modelo(self):
         try:
             from faster_whisper import WhisperModel
-            caminho_modelos = Path.home() / ".cache" / "snoopy" / "whisper"
-            caminho_modelos.mkdir(parents=True, exist_ok=True)
+            cache = Path.home() / ".cache" / "snoopy" / "whisper"
+            cache.mkdir(parents=True, exist_ok=True)
             self._modelo = WhisperModel(
-                self.modelo_whisper_tamanho,
+                self._tamanho_modelo,
                 device="cpu",
                 compute_type="int8",
-                download_root=str(caminho_modelos)
+                download_root=str(cache)
             )
-            logger.info("✅ faster-whisper carregado (CPU, int8)")
+            logger.info("✅ faster-whisper carregado (CPU/int8)")
         except ImportError:
-            logger.warning(
-                "faster-whisper não encontrado. "
-                "Tentando whisper padrão..."
-            )
-            self._carregar_whisper_padrao()
-
-    def _carregar_whisper_padrao(self):
-        """Fallback para o Whisper original da OpenAI (offline)."""
-        try:
-            import whisper
-            self._modelo = whisper.load_model(self.modelo_whisper_tamanho)
-            self._usar_whisper_padrao = True
-            logger.info("✅ Whisper padrão carregado")
-        except ImportError:
-            raise RuntimeError(
-                "Nenhum modelo Whisper encontrado.\n"
-                "Instale: pip install faster-whisper\n"
-                "ou:       pip install openai-whisper"
-            )
+            try:
+                import whisper  # type: ignore[import-untyped]
+                self._modelo = whisper.load_model(self._tamanho_modelo)
+                self._usar_whisper_padrao = True
+                logger.info("✅ whisper padrão carregado")
+            except ImportError:
+                raise RuntimeError(
+                    "Nenhum Whisper instalado.\n"
+                    "Execute: pip install faster-whisper"
+                )
 
     def _iniciar_threads(self):
-        """Inicia as threads de captura e processamento de áudio."""
-        self._thread_escuta = threading.Thread(
-            target=self._loop_captura_audio,
-            daemon=True,
-            name="snoopy-captura-audio"
-        )
-        self._thread_processamento = threading.Thread(
-            target=self._loop_processamento_audio,
-            daemon=True,
-            name="snoopy-processamento-audio"
-        )
-        self._thread_escuta.start()
-        self._thread_processamento.start()
+        threading.Thread(
+            target=self._thread_captura,
+            daemon=True, name="snoopy-audio-captura"
+        ).start()
+        threading.Thread(
+            target=self._thread_vad,
+            daemon=True, name="snoopy-audio-vad"
+        ).start()
+        threading.Thread(
+            target=self._thread_transcricao,
+            daemon=True, name="snoopy-audio-transcricao"
+        ).start()
         logger.info("🎙️  Ouvinte ativo. Aguardando 'Snoopy'...")
 
-    def _loop_captura_audio(self):
-        """Loop de captura contínua de áudio do microfone."""
+    # ------------------------------------------------------------------ #
+    #  THREAD 1 — Captura contínua de áudio                               #
+    # ------------------------------------------------------------------ #
+    def _thread_captura(self):
         try:
             import sounddevice as sd
 
-            def callback_audio(indata, frames, time_info, status):
-                if status:
-                    logger.debug(f"Status de áudio: {status}")
-                # Ignora áudio enquanto o Snoopy está falando (evita eco da própria voz)
+            def _cb(indata, frames, time_info, status):
                 if self.ativo and not self.silenciado:
-                    self._fila_audio.put(indata.copy())
+                    self._fila_chunks.put(indata.copy())
 
             with sd.InputStream(
                 samplerate=self.taxa_amostragem,
                 channels=1,
                 dtype="float32",
                 blocksize=self.tamanho_chunk,
-                callback=callback_audio
+                callback=_cb
             ):
                 while self.ativo:
-                    import time
-                    time.sleep(0.1)
-
-        except ImportError:
-            logger.error(
-                "sounddevice não instalado. "
-                "Execute: pip install sounddevice"
-            )
+                    time.sleep(0.05)
         except Exception as e:
             logger.error(f"Erro na captura de áudio: {e}")
 
-    def _loop_processamento_audio(self):
-        """
-        Coleta chunks de áudio, detecta segmentos de fala
-        e transcreve com Whisper.
-        """
-        import time
-
-        buffer_audio = []
+    # ------------------------------------------------------------------ #
+    #  THREAD 2 — VAD simples: agrupa chunks em segmentos de fala         #
+    # ------------------------------------------------------------------ #
+    def _thread_vad(self):
+        buffer = []
         ultimo_som = time.time()
         gravando = False
 
         while self.ativo:
             try:
-                chunk = self._fila_audio.get(timeout=0.1)
-                nivel = float(np.abs(chunk).mean())
+                chunk = self._fila_chunks.get(timeout=0.1)
+            except queue.Empty:
+                # Verifica timeout de silêncio mesmo sem novos chunks
+                if gravando and (time.time() - ultimo_som) > self.duracao_silencio:
+                    gravando = False
+                    duracao = len(buffer) * self.tamanho_chunk / self.taxa_amostragem
+                    if duracao >= self.duracao_min_frase:
+                        self._fila_segmentos.put(list(buffer))
+                    buffer = []
+                continue
 
-                if nivel > self.limiar_silencio:
-                    ultimo_som = time.time()
-                    if not gravando:
-                        gravando = True
-                        buffer_audio = []
-                        logger.debug("🔴 Início de fala detectado")
+            nivel = float(np.abs(chunk).mean())
 
-                if gravando:
-                    buffer_audio.append(chunk)
-                    duracao_gravada = (
-                        len(buffer_audio) * self.tamanho_chunk / self.taxa_amostragem
-                    )
+            if nivel > self.limiar_silencio:
+                ultimo_som = time.time()
+                if not gravando:
+                    gravando = True
+                    buffer = []
+                    logger.debug("🔴 Fala detectada")
 
-                    silencio_detectado = (
-                        time.time() - ultimo_som > self.duracao_silencio
-                    )
-                    duracao_maxima = duracao_gravada > self.duracao_max_frase
+            if gravando:
+                buffer.append(chunk)
+                duracao = len(buffer) * self.tamanho_chunk / self.taxa_amostragem
 
-                    if silencio_detectado or duracao_maxima:
-                        gravando = False
-                        logger.debug("⏹️  Fim de fala detectado")
-                        if len(buffer_audio) > 5:  # Ignora segmentos muito curtos
-                            self._transcrever_e_processar(buffer_audio)
-                        buffer_audio = []
+                silencio = (time.time() - ultimo_som) > self.duracao_silencio
+                muito_longo = duracao > self.duracao_max_frase
 
+                if silencio or muito_longo:
+                    gravando = False
+                    logger.debug(f"⏹️  Segmento: {duracao:.1f}s")
+                    if duracao >= self.duracao_min_frase:
+                        self._fila_segmentos.put(list(buffer))
+                    buffer = []
+
+    # ------------------------------------------------------------------ #
+    #  THREAD 3 — Transcrição e detecção da palavra de ativação           #
+    # ------------------------------------------------------------------ #
+    def _thread_transcricao(self):
+        while self.ativo:
+            try:
+                segmento = self._fila_segmentos.get(timeout=0.5)
             except queue.Empty:
                 continue
+
+            try:
+                audio_np = np.concatenate(segmento, axis=0).flatten()
+                texto = self._transcrever(audio_np)
+
+                if not texto:
+                    continue
+
+                logger.info(f"📝 Transcrito: '{texto}'")
+
+                ativado, pos_fim = _detectar_ativacao(texto, self._variacoes)
+
+                if not ativado:
+                    logger.debug("Palavra de ativação não detectada.")
+                    continue
+
+                # Extrai o comando — tudo depois da palavra de ativação
+                comando = texto[pos_fim:].strip()
+                comando = re.sub(r'^[\s,\.!?:;\-]+', '', comando).strip()
+
+                # Remove ocorrências extras da palavra de ativação no comando
+                for v in self._variacoes:
+                    comando = re.sub(
+                        r'\b' + re.escape(v) + r'\b', '', comando,
+                        flags=re.IGNORECASE
+                    ).strip()
+
+                comando = re.sub(r'\s{2,}', ' ', comando).strip()
+
+                if len(comando) > 2:
+                    logger.info(f"✅ Comando: '{comando}'")
+                    asyncio.run_coroutine_threadsafe(
+                        self.callback(comando), self._loop
+                    )
+                else:
+                    logger.info("Ativação sem comando — cumprimentando")
+                    asyncio.run_coroutine_threadsafe(
+                        self.callback("olá"), self._loop
+                    )
+
             except Exception as e:
-                logger.error(f"Erro no processamento de áudio: {e}")
-
-    def _transcrever_e_processar(self, buffer_audio: list):
-        """Transcreve o áudio capturado e verifica a palavra de ativação."""
-        try:
-            audio_np = np.concatenate(buffer_audio, axis=0).flatten()
-            texto = self._transcrever(audio_np)
-
-            if not texto:
-                return
-
-            texto_limpo = texto.strip()
-            logger.info(f"Transcrito: '{texto_limpo}'")
-
-            texto_lower = texto_limpo.lower()
-
-            # Verifica se a palavra de ativação está presente
-            if self.palavra_ativacao not in texto_lower:
-                return
-
-            # Extrai o comando preservando caixa original para melhor compreensão
-            # Encontra a posição da palavra de ativação (insensível a maiúsculas)
-            import re
-            padrao = re.compile(re.escape(self.palavra_ativacao), re.IGNORECASE)
-            match = padrao.search(texto_limpo)
-
-            if match:
-                # Tudo após a palavra de ativação é o comando
-                comando = texto_limpo[match.end():].strip()
-                # Remove vírgulas e pontuação inicial
-                comando = re.sub(r'^[\s,\.!?:;]+', '', comando).strip()
-            else:
-                comando = ""
-
-            # Remove o nome caso tenha aparecido no meio ou no final também
-            comando = padrao.sub("", comando).strip()
-
-            if len(comando) > 2:
-                logger.info(f"✅ Comando final: '{comando}'")
-                asyncio.run_coroutine_threadsafe(
-                    self.callback(comando),
-                    self._loop
-                )
-            else:
-                # Só o nome foi dito sem comando — cumprimenta
-                logger.info("Palavra de ativação detectada sem comando — cumprimentando")
-                asyncio.run_coroutine_threadsafe(
-                    self.callback("olá"),
-                    self._loop
-                )
-
-        except Exception as e:
-            logger.error(f"Erro na transcrição: {e}")
+                logger.error(f"Erro na transcrição/detecção: {e}", exc_info=True)
 
     def _transcrever(self, audio_np: np.ndarray) -> str:
-        """Usa o Whisper para transcrever o áudio."""
         if self._modelo is None:
             return ""
-
         try:
-            # faster-whisper
-            if hasattr(self._modelo, "transcribe") and not getattr(
-                self, "_usar_whisper_padrao", False
-            ):
-                segmentos, _ = self._modelo.transcribe(
+            if not self._usar_whisper_padrao:
+                segs, _ = self._modelo.transcribe(
                     audio_np,
-                    language=self.modelo_whisper_idioma,
+                    language=self._idioma,
                     beam_size=5,
                     vad_filter=True,
-                    vad_parameters={"min_silence_duration_ms": 500}
+                    vad_parameters={"min_silence_duration_ms": 300},
+                    initial_prompt="Snoopy"   # dica para o modelo
                 )
-                return " ".join(seg.text for seg in segmentos).strip()
+                return " ".join(s.text for s in segs).strip()
             else:
-                # Whisper padrão
-                import whisper
-                resultado = self._modelo.transcribe(
-                    audio_np,
-                    language=self.modelo_whisper_idioma,
-                    fp16=False
+                import whisper  # type: ignore[import-untyped]
+                r = self._modelo.transcribe(
+                    audio_np, language=self._idioma, fp16=False,
+                    initial_prompt="Snoopy"
                 )
-                return resultado["text"].strip()
+                return r["text"].strip()
         except Exception as e:
-            logger.error(f"Erro na transcrição Whisper: {e}")
+            logger.error(f"Erro no Whisper: {e}")
             return ""
 
     async def parar(self):
-        """Para o ouvinte."""
         self.ativo = False
-        logger.info("Ouvinte de voz parado.")
+        logger.info("Ouvinte parado.")
