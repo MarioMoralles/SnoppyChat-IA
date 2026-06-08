@@ -1,13 +1,12 @@
 """
-Módulo de Síntese de Voz — Reescrito
-Usa pyttsx3 em thread separada para NÃO bloquear o asyncio.
-Piper TTS como opção superior quando disponível.
+Módulo de Síntese de Voz — pyttsx3 corrigido para Windows
+Recria o motor a cada fala (bug clássico do pyttsx3: trava ao reutilizar).
+Roda em thread separada para não bloquear o asyncio.
 """
 
 import asyncio
 import subprocess
 import tempfile
-import threading
 import sys
 from pathlib import Path
 from typing import Optional
@@ -20,11 +19,8 @@ logger = obter_logger("voz.sintetizador")
 
 class Sintetizador:
     """
-    Sintetizador de voz offline que nunca bloqueia o event loop.
-
-    Prioridade:
-    1. Piper TTS  — qualidade neural
-    2. pyttsx3    — fallback sempre disponível no Windows/Linux/macOS
+    Sintetizador de voz offline que nunca bloqueia o event loop
+    e que recria o motor pyttsx3 a cada fala (evita o travamento do Windows).
     """
 
     VOZ_PIPER_PT_BR = "pt_BR-faber-medium"
@@ -33,16 +29,18 @@ class Sintetizador:
         self.config = config
         self.motor = config.get("tts_motor", "piper")
         self.voz_piper = config.get("tts_voz_piper", self.VOZ_PIPER_PT_BR)
-        self.velocidade = config.get("tts_velocidade", 1.0)
+
+        # Velocidade da fala (palavras por minuto). 150-175 soa mais natural.
+        self.velocidade_wpm = config.get("tts_velocidade_wpm", 175)
+        self.volume = config.get("tts_volume", 1.0)
 
         self._piper_ok = False
-        self._pyttsx3_motor = None
+        self._id_voz_pt = None   # guarda o ID da voz pt-BR encontrada
         self._lock_fala = asyncio.Lock()
         self._dir_vozes = Path.home() / ".cache" / "snoopy" / "piper"
         self._dir_vozes.mkdir(parents=True, exist_ok=True)
 
-        # Referência ao ouvinte para silenciar o mic durante a fala
-        self.ouvinte = None
+        self.ouvinte = None  # para silenciar o mic durante a fala
 
     async def inicializar(self):
         if self.motor == "piper":
@@ -51,8 +49,37 @@ class Sintetizador:
         if not self._piper_ok:
             logger.warning("Piper TTS não disponível. Usando pyttsx3 como fallback.")
             await asyncio.get_running_loop().run_in_executor(
-                None, self._init_pyttsx3
+                None, self._descobrir_voz_pt
             )
+
+    # ------------------------------------------------------------------ #
+    #  Descoberta da melhor voz em português (uma vez só)                 #
+    # ------------------------------------------------------------------ #
+    def _descobrir_voz_pt(self):
+        """Descobre o ID da melhor voz pt-BR disponível no sistema."""
+        try:
+            import pyttsx3
+            motor = pyttsx3.init()
+            melhor = None
+            for voz in motor.getProperty("voices"):
+                texto = (voz.id + " " + voz.name).lower()
+                # Prioriza vozes brasileiras
+                if "brazil" in texto or "pt-br" in texto or "maria" in texto \
+                   or "daniel" in texto:
+                    melhor = voz.id
+                    logger.info(f"Voz pt-BR encontrada: {voz.name}")
+                    break
+                elif "portuguese" in texto or "pt_" in texto or "_pt" in texto:
+                    melhor = voz.id  # guarda mas continua procurando br
+            self._id_voz_pt = melhor
+            try:
+                motor.stop()
+                del motor
+            except Exception:
+                pass
+            logger.info("✅ pyttsx3 pronto (voz recriada a cada fala)")
+        except Exception as e:
+            logger.error(f"Erro ao descobrir voz pyttsx3: {e}")
 
     # ------------------------------------------------------------------ #
     #  Piper TTS                                                           #
@@ -70,18 +97,14 @@ class Sintetizador:
                 return True
         except FileNotFoundError:
             pass
-        logger.warning(
-            "Piper não encontrado. Instale em: https://github.com/rhasspy/piper/releases"
-        )
+        logger.warning("Piper não encontrado.")
         return False
 
     async def _falar_piper(self, texto: str):
         modelo = self._dir_vozes / f"{self.voz_piper}.onnx"
         if not modelo.exists():
-            logger.error(f"Modelo Piper não encontrado: {modelo}")
             await self._falar_pyttsx3(texto)
             return
-
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
             wav = f.name
         try:
@@ -108,72 +131,48 @@ class Sintetizador:
         await p.communicate()
 
     # ------------------------------------------------------------------ #
-    #  pyttsx3 — roda em thread para não bloquear o asyncio               #
+    #  pyttsx3 — recria motor a cada fala, roda em thread                 #
     # ------------------------------------------------------------------ #
-    def _init_pyttsx3(self):
-        """Inicializa pyttsx3 (chamado em executor para não bloquear)."""
-        try:
-            import pyttsx3
-            motor = pyttsx3.init()
-            motor.setProperty("rate", int(160 * self.velocidade))
-            motor.setProperty("volume", 0.95)
-
-            # Seleciona voz em português se disponível
-            for voz in motor.getProperty("voices"):
-                id_lower = voz.id.lower()
-                nome_lower = voz.name.lower()
-                if "pt" in id_lower or "brazil" in nome_lower or \
-                   "portuguese" in nome_lower or "maria" in nome_lower:
-                    motor.setProperty("voice", voz.id)
-                    logger.info(f"Voz pyttsx3 selecionada: {voz.name}")
-                    break
-
-            self._pyttsx3_motor = motor
-            logger.info("✅ pyttsx3 inicializado como TTS de fallback")
-        except Exception as e:
-            logger.error(f"Falha ao inicializar pyttsx3: {e}")
-
     async def _falar_pyttsx3(self, texto: str):
-        """
-        Executa pyttsx3 em um executor de thread para não bloquear o asyncio.
-        pyttsx3.runAndWait() é bloqueante — NUNCA chamar direto na corrotina.
-        """
-        if not self._pyttsx3_motor:
-            logger.warning(f"[sem TTS] {texto}")
-            return
-
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self._pyttsx3_sync, texto)
 
     def _pyttsx3_sync(self, texto: str):
-        """Fala de forma síncrona — chamado apenas via executor."""
+        """
+        Cria um motor pyttsx3 NOVO a cada chamada e o destrói depois.
+        Esta é a forma confiável de usar pyttsx3 no Windows — reutilizar
+        a mesma instância faz ele falar só na 1ª vez e travar nas seguintes.
+        """
         try:
-            self._pyttsx3_motor.say(texto)
-            self._pyttsx3_motor.runAndWait()
-        except Exception as e:
-            logger.error(f"Erro pyttsx3: {e}")
-            # Tenta reinicializar o motor (pode travar após erros)
+            import pyttsx3
+            motor = pyttsx3.init()
+            motor.setProperty("rate", int(self.velocidade_wpm))
+            motor.setProperty("volume", float(self.volume))
+            if self._id_voz_pt:
+                motor.setProperty("voice", self._id_voz_pt)
+            motor.say(texto)
+            motor.runAndWait()
             try:
-                self._init_pyttsx3()
+                motor.stop()
+                del motor
             except Exception:
                 pass
+        except Exception as e:
+            logger.error(f"Erro pyttsx3: {e}")
 
     # ------------------------------------------------------------------ #
     #  Interface pública                                                   #
     # ------------------------------------------------------------------ #
     async def falar(self, texto: str):
-        """Fala o texto sem bloquear o event loop."""
         if not texto.strip():
             return
 
         async with self._lock_fala:
-            # Silencia o microfone para evitar que o Snoopy "ouça" a si mesmo
             if self.ouvinte:
                 self.ouvinte.silenciado = True
-
             try:
-                logger.info(f"🔊 Falando: '{texto[:60]}...' " if len(texto) > 60
-                            else f"🔊 Falando: '{texto}'")
+                preview = texto[:60] + "..." if len(texto) > 60 else texto
+                logger.info(f"🔊 Falando: '{preview}'")
                 if self._piper_ok:
                     await self._falar_piper(texto)
                 else:
@@ -181,8 +180,6 @@ class Sintetizador:
             except Exception as e:
                 logger.error(f"Erro ao falar: {e}")
             finally:
-                # Reativa o microfone após a fala (sempre, mesmo em erro)
                 if self.ouvinte:
-                    # Pequena pausa extra para o áudio do alto-falante dissipar
                     await asyncio.sleep(0.3)
-                    self.ouvinte.silenciado = False
+                    self.ouvinte.silenciado = FalseA

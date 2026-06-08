@@ -28,6 +28,8 @@ CONFIG_PADRAO = {
     "tts_motor": "piper",            # "piper" | "pyttsx3"
     "tts_voz_piper": "pt_BR-faber-medium",
     "tts_velocidade": 1.0,
+    "tts_velocidade_wpm": 175,       # Palavras por minuto (150-200 = mais natural)
+    "tts_volume": 1.0,               # Volume 0.0 a 1.0
 
     # Memória
     "max_contexto_conversa": 10,

@@ -141,36 +141,46 @@ class Snoopy:
 
         logger.info(f"Entrada recebida: '{texto}'")
 
-        # Adiciona ao contexto conversacional
-        self._adicionar_contexto("usuario", texto)
+        try:
+            # Adiciona ao contexto conversacional
+            self._adicionar_contexto("usuario", texto)
 
-        # Detecta a intenção para decidir o fluxo
-        intencao = await self.detector_intencao.detectar(texto, self._contexto_conversa)
-        logger.debug(f"Intenção detectada: {intencao}")
+            # Detecta a intenção para decidir o fluxo
+            intencao = await self.detector_intencao.detectar(texto, self._contexto_conversa)
+            logger.info(f"Intenção: {intencao.get('tipo')} ({intencao.get('intencao')})")
 
-        if intencao.get("tipo") == "tarefa_background":
-            # Tarefa pesada que deve rodar em segundo plano
-            descricao = intencao.get("descricao", texto)
-            id_tarefa = await self.gerenciador_tarefas.agendar(
-                descricao=descricao,
-                contexto=self._contexto_conversa.copy()
-            )
-            resposta = (
-                f"Certo! Estou processando isso em segundo plano. "
-                f"Tarefa #{id_tarefa} iniciada. Vou te avisar quando terminar."
-            )
-            print(f"\n🐾 Snoopy: {resposta}\n")
-            await self._falar(resposta)
-        else:
-            # Resposta imediata
-            resposta = await self.processador_ia.processar(
-                mensagem=texto,
-                contexto=self._contexto_conversa,
-                intencao=intencao
-            )
-            self._adicionar_contexto("assistente", resposta)
-            print(f"\n🐾 Snoopy: {resposta}\n")
-            await self._falar(resposta)
+            if intencao.get("tipo") == "tarefa_background":
+                descricao = intencao.get("descricao", texto)
+                id_tarefa = await self.gerenciador_tarefas.agendar(
+                    descricao=descricao,
+                    contexto=self._contexto_conversa.copy()
+                )
+                resposta = (
+                    f"Certo! Estou processando isso em segundo plano. "
+                    f"Tarefa número {id_tarefa} iniciada. Vou te avisar quando terminar."
+                )
+                print(f"\n🐾 Snoopy: {resposta}\n")
+                await self._falar(resposta)
+            else:
+                # Resposta imediata
+                logger.info("Enviando ao LLM...")
+                resposta = await self.processador_ia.processar(
+                    mensagem=texto,
+                    contexto=self._contexto_conversa,
+                    intencao=intencao
+                )
+                logger.info(f"LLM respondeu: '{resposta[:80]}...'")
+                self._adicionar_contexto("assistente", resposta)
+                print(f"\n🐾 Snoopy: {resposta}\n")
+                await self._falar(resposta)
+                logger.info("Resposta falada com sucesso.")
+
+        except Exception as e:
+            logger.error(f"ERRO ao processar entrada: {e}", exc_info=True)
+            try:
+                await self._falar("Desculpe, tive um problema ao processar isso.")
+            except Exception:
+                pass
 
     async def _notificar_conclusao(self, id_tarefa: int, resultado: str):
         """Callback chamado quando uma tarefa em background termina."""
