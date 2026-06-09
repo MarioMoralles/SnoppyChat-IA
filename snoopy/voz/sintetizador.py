@@ -182,4 +182,4 @@ class Sintetizador:
             finally:
                 if self.ouvinte:
                     await asyncio.sleep(0.3)
-                    self.ouvinte.silenciado = FalseA
+                    self.ouvinte.silenciado = False

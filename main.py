@@ -32,9 +32,9 @@ Exemplos de uso:
     )
     parser.add_argument(
         "--modo",
-        choices=["voz", "texto", "ditado"],
+        choices=["voz", "texto", "ditado", "interface"],
         default="voz",
-        help="Modo de interação (padrão: voz)"
+        help="Modo de interação (padrão: voz). 'interface' abre a interface gráfica web."
     )
     parser.add_argument(
         "--configurar",

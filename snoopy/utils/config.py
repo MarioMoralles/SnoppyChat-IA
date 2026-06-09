@@ -34,6 +34,27 @@ CONFIG_PADRAO = {
     # Memória
     "max_contexto_conversa": 10,
 
+    # Wake word (detecção de ativação rápida)
+    "wake_word_limiar": 0.5,
+    "wake_word_modelo_caminho": "",   # caminho para modelo "snoopy" customizado
+
+    # Embeddings (busca semântica)
+    "embeddings_modelo": "paraphrase-multilingual-MiniLM-L12-v2",
+
+    # Obsidian (memória estendida) — defina o caminho do seu vault para ativar
+    "obsidian_vault": "",             # ex: "C:/Users/voce/Obsidian/MeuVault"
+
+    # Geração de imagens
+    "imagem_modelo": "runwayml/stable-diffusion-v1-5",
+    "imagem_passos": 25,
+
+    # Proatividade
+    "proatividade_ativa": True,
+    "proatividade_frequencia": 0.5,
+
+    # Interface gráfica
+    "interface_porta": 8000,
+
     # Ditado
     "ditado_tecla_atalho": "ctrl+alt",
     "ditado_remover_preenchimento": True,
