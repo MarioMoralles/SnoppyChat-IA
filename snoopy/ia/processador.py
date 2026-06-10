@@ -81,11 +81,20 @@ class ProcessadorIA:
         agora = datetime.now().strftime("%d/%m/%Y %H:%M")
         bloco_ferr = ""
         if self.caixa_ferramentas:
+            nomes = ", ".join(self.caixa_ferramentas.listar_nomes())
             bloco_ferr = (
-                "\n\nVocê pode USAR FERRAMENTAS. Se a tarefa exigir uma ação no "
-                "computador, responda APENAS com um JSON neste formato:\n"
-                '{"ferramenta": "nome", "argumentos": {...}}\n'
-                "Se for só conversa, responda normalmente em texto.\n\n"
+                "\n\n## FERRAMENTAS\n"
+                "Se o pedido exigir uma AÇÃO no computador, responda APENAS com JSON "
+                "(nada além do JSON), neste formato exato:\n"
+                '{"ferramenta": "NOME_EXATO", "argumentos": {...}}\n\n'
+                f"Use SOMENTE estes nomes exatos de ferramenta: {nomes}\n\n"
+                "Exemplos:\n"
+                '- "abre o bloco de notas" → {"ferramenta": "abrir_app", "argumentos": {"nome_app": "notepad"}}\n'
+                '- "abre a calculadora" → {"ferramenta": "abrir_app", "argumentos": {"nome_app": "calc"}}\n'
+                '- "cria uma pasta Projetos" → {"ferramenta": "criar_pasta", "argumentos": {"caminho": "Projetos"}}\n'
+                '- "organiza meus downloads" → {"ferramenta": "organizar_pasta", "argumentos": {"caminho": "~/Downloads"}}\n'
+                '- "pesquisa gatos no google" → {"ferramenta": "pesquisar_web", "argumentos": {"consulta": "gatos"}}\n\n'
+                "Se for apenas conversa (sem ação), responda em texto normal, NUNCA com JSON.\n\n"
                 + self.caixa_ferramentas.descrever_para_llm()
             )
         bloco_proa = self.proatividade.montar_instrucao_prompt() if self.proatividade else ""
@@ -148,32 +157,85 @@ class ProcessadorIA:
         if not match:
             return resposta
 
+        nome = None
+        args = {}
         try:
             dados = json.loads(match.group(0))
             nome = dados.get("ferramenta")
-            args = dados.get("argumentos", {})
-            if nome not in self.caixa_ferramentas.listar_nomes():
-                return resposta
-
-            logger.info(f"🔧 LLM solicitou ferramenta: {nome}")
-            resultado = await self.caixa_ferramentas.executar(nome, args)
-
-            # Gera uma resposta natural sobre o resultado da ferramenta
-            from datetime import datetime
-            mensagens = [
-                {"role": "system", "content":
-                 "Você é Snoopy. Resuma o resultado da ação de forma natural e breve, em português."},
-                {"role": "user", "content":
-                 f"O usuário pediu: '{mensagem_original}'. "
-                 f"Eu executei a ferramenta '{nome}' e o resultado foi: {resultado}. "
-                 f"Responda ao usuário de forma natural confirmando o que foi feito."}
-            ]
-            return await self._chamar_llm(mensagens)
+            args = dados.get("argumentos", {}) or {}
         except json.JSONDecodeError:
-            return resposta
-        except Exception as e:
-            logger.error(f"Erro ao tratar ferramenta: {e}")
-            return resposta
+            # JSON malformado — não mostra o lixo ao usuário, pede de novo
+            logger.warning("JSON de ferramenta malformado. Reprocessando como conversa.")
+            return await self._responder_sem_ferramenta(mensagem_original)
+
+        # Mapeia ferramentas que o LLM "inventou" para as reais
+        nome = self._mapear_ferramenta(nome, args, mensagem_original)
+
+        # Se mesmo assim não existe, responde naturalmente em vez de vazar JSON
+        if nome not in self.caixa_ferramentas.listar_nomes():
+            logger.warning(f"Ferramenta inexistente solicitada: '{nome}'. Respondendo natural.")
+            return await self._responder_sem_ferramenta(mensagem_original)
+
+        logger.info(f"🔧 Executando ferramenta: {nome}({args})")
+        resultado = await self.caixa_ferramentas.executar(nome, args)
+
+        # Gera uma resposta natural sobre o resultado
+        mensagens = [
+            {"role": "system", "content":
+             "Você é Snoopy. Confirme ao usuário o que foi feito, de forma natural e breve, em português. Não mostre JSON."},
+            {"role": "user", "content":
+             f"O usuário pediu: '{mensagem_original}'. Executei a ação e o resultado foi: {resultado}. "
+             f"Responda confirmando naturalmente."}
+        ]
+        return await self._chamar_llm(mensagens)
+
+    def _mapear_ferramenta(self, nome: str, args: dict, mensagem: str) -> str:
+        """
+        O LLM às vezes inventa nomes de ferramentas (ex: 'bloco_notas').
+        Aqui mapeamos esses nomes para as ferramentas reais.
+        """
+        if not nome:
+            return ""
+        nome_l = nome.lower()
+        disponiveis = self.caixa_ferramentas.listar_nomes()
+
+        if nome_l in disponiveis:
+            return nome_l
+
+        # Mapeamento de apelidos comuns → abrir_app
+        apps_conhecidos = {
+            "bloco_notas": "notepad", "bloco_de_notas": "notepad",
+            "notepad": "notepad", "calculadora": "calc", "calc": "calc",
+            "navegador": "chrome", "chrome": "chrome", "edge": "msedge",
+            "explorador": "explorer", "explorer": "explorer",
+            "paint": "mspaint", "word": "winword", "excel": "excel",
+        }
+        if nome_l in apps_conhecidos and "abrir_app" in disponiveis:
+            # Injeta o nome do app real nos argumentos
+            args["nome_app"] = apps_conhecidos[nome_l]
+            return "abrir_app"
+
+        # Se o nome parece um app e temos abrir_app, tenta abrir direto
+        if "abrir" in nome_l and "abrir_app" in disponiveis:
+            if "nome_app" not in args:
+                args["nome_app"] = nome_l.replace("abrir_", "").replace("abrir", "").strip("_")
+            return "abrir_app"
+
+        return nome_l
+
+    async def _responder_sem_ferramenta(self, mensagem: str) -> str:
+        """Gera uma resposta conversacional normal (quando não há ferramenta válida)."""
+        from datetime import datetime
+        agora = datetime.now().strftime("%d/%m/%Y %H:%M")
+        sistema = (
+            f"Você é Snoopy, assistente em português. Data: {agora}. "
+            "Responda de forma natural e útil. NUNCA mostre JSON ao usuário."
+        )
+        mensagens = [
+            {"role": "system", "content": sistema},
+            {"role": "user", "content": mensagem}
+        ]
+        return await self._chamar_llm(mensagens)
 
     async def _salvar_memoria(self, pergunta: str, resposta: str):
         """Salva a conversa na memória SQLite, semântica e Obsidian."""
