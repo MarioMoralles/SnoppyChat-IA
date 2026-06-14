@@ -1,38 +1,16 @@
-# ============================================================
-# Snoopy - Dependências Python
-# Instale o básico com: pip install -r requirements.txt
-# Recursos avançados são opcionais (veja seções abaixo)
-# ============================================================
+﻿pyyaml
+psutil
+pyperclip
+pyttsx3
+sounddevice
+numpy
+mss
+pillow
+pytesseract
+faster-whisper
+webrtcvad-wheels
+google-genai
+python-dotenv
+requests
+beautifulsoup4
 
-# --- BÁSICO (necessário) ---
-httpx>=0.27.0              # Cliente HTTP para Ollama/LM Studio
-faster-whisper>=1.0.0      # Reconhecimento de voz offline
-sounddevice>=0.4.6         # Captura de áudio
-numpy>=1.24.0              # Processamento de áudio
-pyttsx3>=2.90              # Síntese de voz (fallback)
-python-dotenv>=1.0.0       # Variáveis de ambiente
-
-# --- INTERFACE GRÁFICA (recomendado) ---
-fastapi>=0.110.0           # Servidor web da interface
-uvicorn[standard]>=0.27.0  # Servidor ASGI
-python-multipart>=0.0.9    # Upload de formulários
-
-# --- WAKE WORD (velocidade + precisão) ---
-# Detecta "Snoopy" sem transcrever tudo — muito mais rápido
-openwakeword>=0.6.0
-
-# --- BUSCA SEMÂNTICA / MEMÓRIA INTELIGENTE ---
-# Memória que entende significado, não só palavras-chave
-sentence-transformers>=2.5.0
-
-# --- GERAÇÃO DE IMAGENS (opcional, pesado) ---
-# Stable Diffusion local. Melhor com GPU NVIDIA.
-# diffusers>=0.27.0
-# torch>=2.2.0
-# transformers>=4.38.0
-# accelerate>=0.27.0
-
-# --- EXTRAS OPCIONAIS ---
-# pyperclip>=1.8.2         # Modo ditado (colar texto)
-# pynput>=1.7.6            # Tecla de atalho do ditado
-# plyer>=2.1.0            # Notificações do SO

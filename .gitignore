@@ -1,53 +1,16 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-.venv/
+﻿.venv/
 venv/
-env/
-dist/
-build/
-*.egg-info/
-.eggs/
-
-# Ambientes e segredos
-.env
-*.env
-config.json
-
-# Modelos e cache (muito grandes para o git)
-*.onnx
-*.bin
-*.gguf
-*.safetensors
-*.pt
-*.pth
-~/.cache/snoopy/
-
-# Banco de dados local
-*.db
-*.sqlite
-*.sqlite3
-
-# Logs
+__pycache__/
+*.pyc
+*.pyo
 logs/
 *.log
-
-# IDEs
+models/
+config/secrets.yaml
+.env
 .vscode/
 .idea/
-*.swp
-*.swo
-.DS_Store
-Thumbs.db
-
-# Pytest
-.pytest_cache/
-htmlcov/
-.coverage
-
-# Jupyter
-.ipynb_checkpoints/
-*.ipynb
+.venv/
+config/.env
+logs/
+__pycache__/
